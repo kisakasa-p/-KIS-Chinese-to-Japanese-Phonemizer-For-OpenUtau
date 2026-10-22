@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ChinesetoJapanesePhonemizer</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="OpenUtau.Api">
+      <HintPath>$(MSBuildProjectDirectory)\libs\OpenUtau.Api.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OpenUtau.Core">
+      <HintPath>$(MSBuildProjectDirectory)\libs\OpenUtau.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Pinyin">
+      <HintPath>$(MSBuildProjectDirectory)\libs\Pinyin.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Serilog">
+      <HintPath>$(MSBuildProjectDirectory)\libs\Serilog.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
