@@ -697,7 +697,7 @@ si=す
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "[ZH to JA] 解析映射表失败");
+                Log.Error(ex, "[ZH to JA] 解析映射表失败！");
             }
         }
 
