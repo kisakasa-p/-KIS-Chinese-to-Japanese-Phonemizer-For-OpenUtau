@@ -620,7 +620,6 @@ si=す
         {
             if (string.IsNullOrEmpty(content)) return;
 
-            // 重置音头保护配置
             onsetProtectionEnabled = false;
             onsetProtectionObjects.Clear();
             onsetProtectionMagnitude = 10;
@@ -674,7 +673,7 @@ si=す
 
                         foreach (var part in rawParts)
                         {
-                            if (IsKanaStatic(part))
+                            if (IsExplicitVcvOrKana(part))
                                 phonemes.Add(part);
                             else if (int.TryParse(part, out int w))
                                 weights.Add(w);
@@ -700,6 +699,13 @@ si=す
             {
                 Log.Error(ex, "[ZH to JA] 解析映射表失败");
             }
+        }
+
+        private static bool IsExplicitVcvOrKana(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            if (Regex.IsMatch(text, @"^[\u3040-\u309F\u30A0-\u30FF]+$")) return true;
+            return Regex.IsMatch(text, @"^[a-zA-Z]\s+[\u3040-\u309F\u30A0-\u30FF]+$");
         }
 
         private static bool TryParseOnsetProtectionLine(string line, out bool consumed)
@@ -747,7 +753,22 @@ si=す
             return Regex.IsMatch(text, @"^[\u3040-\u309F\u30A0-\u30FF]+$");
         }
 
-        // ========== 音头断音解析（仅 ' 前缀） ==========
+        // ========== 显式 VCV 拆解 ==========
+        private void SplitExplicitVcv(string phoneme, out string prefixVowel, out string body)
+        {
+            prefixVowel = null;
+            body = phoneme;
+            if (string.IsNullOrEmpty(phoneme)) return;
+
+            var m = Regex.Match(phoneme, @"^([a-zA-Z])\s+([\u3040-\u309F\u30A0-\u30FF]+)$");
+            if (m.Success)
+            {
+                prefixVowel = m.Groups[1].Value;
+                body = m.Groups[2].Value;
+            }
+        }
+
+        // ========== 音头断音解析 ==========
         private string ParseHeadBreak(string lyric, out bool headBreak)
         {
             headBreak = false;
@@ -768,12 +789,12 @@ si=す
             if (!onsetProtectionEnabled || onsetProtectionObjects.Count == 0) return false;
             if (string.IsNullOrEmpty(phoneme)) return false;
 
-            string basePhoneme = ExtractBasePhoneme(phoneme);
-            string romaji = ConvertToRomaji(basePhoneme) ?? basePhoneme;
+            SplitExplicitVcv(phoneme, out _, out string body);
+            string romaji = ConvertToRomaji(body) ?? body;
 
             foreach (var obj in onsetProtectionObjects)
             {
-                if (basePhoneme.IndexOf(obj, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                if (body.IndexOf(obj, StringComparison.OrdinalIgnoreCase) >= 0) return true;
                 if (!string.IsNullOrEmpty(romaji) &&
                     romaji.IndexOf(obj, StringComparison.OrdinalIgnoreCase) >= 0) return true;
             }
@@ -846,7 +867,6 @@ si=す
 
             if (!NextNoteTriggersProtection(note, nextNote)) return;
 
-            // magnitude 语义为"百分比增量"，除以 100 叠加到比例权重
             weights[weights.Length - 1] += onsetProtectionMagnitude / 100.0;
         }
 
@@ -881,6 +901,18 @@ si=す
         private List<string> GetPhonemeFallbackOptions(string phoneme)
         {
             var options = new List<string> { phoneme };
+
+            SplitExplicitVcv(phoneme, out string explicitPrefix, out string body);
+
+            if (!string.IsNullOrEmpty(explicitPrefix) && !string.IsNullOrEmpty(body))
+            {
+                if (!options.Contains(body)) options.Add(body);
+                foreach (var opt in GetPhonemeFallbackOptions(body))
+                {
+                    if (!options.Contains(opt)) options.Add(opt);
+                }
+                return options;
+            }
 
             if (phoneme.Length >= 2)
             {
@@ -986,11 +1018,16 @@ si=す
         {
             foreach (var phoneme in phonemes)
             {
-                string basePhoneme = ExtractBasePhoneme(phoneme);
-                string checkTarget = phoneme.Contains(' ') && IsVowel(phoneme.Split(' ')[0])
-                    ? phoneme
-                    : basePhoneme;
+                SplitExplicitVcv(phoneme, out string explicitPrefix, out string body);
 
+                if (!string.IsNullOrEmpty(explicitPrefix))
+                {
+                    if (CheckOtoHit(phoneme, note, out _)) continue;
+                    if (CheckOtoHit(body, note, out _)) continue;
+                    return false;
+                }
+
+                string checkTarget = ExtractBasePhoneme(body);
                 if (!CheckOtoHit(checkTarget, note, out _))
                     return false;
             }
@@ -1006,7 +1043,7 @@ si=す
         // ========== 权重（基础权重唯一来源） ==========
         private double GetPhonemeWeight(string phoneme, string pinyin, int indexInPhonemes, int totalPhonemes, bool hasExtender = false)
         {
-            string basePhoneme = ExtractBasePhoneme(phoneme);
+            SplitExplicitVcv(phoneme, out _, out string basePhoneme);
 
             if (hasExtender && indexInPhonemes == totalPhonemes - 1)
             {
@@ -1033,11 +1070,6 @@ si=す
             return 1.0 / totalPhonemes;
         }
 
-        /// <summary>
-        /// 构建基础权重 double[]：
-        ///   - 若有用户显式 int 权重（[30 70] / phoneticHint），直接按比例
-        ///   - 否则走 GetPhonemeWeight（映射表 override / 延音规则 / 均分）
-        /// </summary>
         private double[] BuildBaseWeights(
             List<string> phonemes,
             int[] userWeights,
@@ -1069,7 +1101,7 @@ si=す
             return weights;
         }
 
-        // ========== 最终时长分配（double 权重） ==========
+        // ========== 最终时长分配 ==========
         private Result SplitWithDoubleWeights(Note note, List<string> phonemes, double[] weights, int totalDuration)
         {
             int count = phonemes.Count;
@@ -1112,9 +1144,6 @@ si=す
             return new Result { phonemes = phonemeList.ToArray() };
         }
 
-        /// <summary>
-        /// 统一收尾：基础权重 → 音头保护叠加 → 时长分配。
-        /// </summary>
         private Result FinalizeWithProtection(
             Note note,
             List<string> phonemes,
@@ -1140,9 +1169,6 @@ si=す
             return SplitWithDoubleWeights(note, phonemes, baseWeights, totalDuration);
         }
 
-        /// <summary>
-        /// hint / 直接映射音素做 VCV 连接后统一收尾。
-        /// </summary>
         private Result SplitHintPhonemes(
             Note note, List<string> phonemes, int[] weights,
             int totalDuration, bool hasExtender,
@@ -1163,28 +1189,45 @@ si=す
             for (int i = 0; i < count; i++)
             {
                 string current = phonemes[i];
-                string connectVowel;
-                if (i == 0)
-                    connectVowel = headBreak ? null : prevVowel;
-                else
-                    connectVowel = GetTailVowel(phonemes[i - 1]);
+                SplitExplicitVcv(current, out string explicitPrefix, out string body);
 
                 string foundPhoneme = null;
 
-                if (!string.IsNullOrEmpty(connectVowel))
+                if (!string.IsNullOrEmpty(explicitPrefix))
                 {
-                    string vcv = $"{connectVowel} {current}";
-                    if (CheckOtoHit(vcv, note, out _))
-                        foundPhoneme = vcv;
+                    if (CheckOtoHit(current, note, out _))
+                        foundPhoneme = current;
+                    else if (CheckOtoHit(body, note, out _))
+                        foundPhoneme = body;
+                    else
+                        foundPhoneme = body;
                 }
-                if (foundPhoneme == null && i == 0)
+                else
                 {
-                    string noPrev = $"- {current}";
-                    if (CheckOtoHit(noPrev, note, out _))
-                        foundPhoneme = noPrev;
+                    string connectVowel;
+                    if (i == 0)
+                        connectVowel = headBreak ? null : prevVowel;
+                    else
+                    {
+                        SplitExplicitVcv(phonemes[i - 1], out _, out string prevBody);
+                        connectVowel = GetTailVowel(prevBody);
+                    }
+
+                    if (!string.IsNullOrEmpty(connectVowel))
+                    {
+                        string vcv = $"{connectVowel} {body}";
+                        if (CheckOtoHit(vcv, note, out _))
+                            foundPhoneme = vcv;
+                    }
+                    if (foundPhoneme == null && i == 0)
+                    {
+                        string noPrev = $"- {body}";
+                        if (CheckOtoHit(noPrev, note, out _))
+                            foundPhoneme = noPrev;
+                    }
+                    if (foundPhoneme == null)
+                        foundPhoneme = body;
                 }
-                if (foundPhoneme == null)
-                    foundPhoneme = current;
 
                 finalPhonemes.Add(foundPhoneme);
             }
@@ -1247,7 +1290,8 @@ si=す
             string[] hiraganas = ConvertToHiraganaArray(lyric, note);
             if (hiraganas == null || hiraganas.Length == 0) return null;
 
-            return hiraganas[hiraganas.Length - 1];
+            SplitExplicitVcv(hiraganas[hiraganas.Length - 1], out _, out string body);
+            return body;
         }
 
         private string[] ConvertToHiraganaArray(string lyric, Note note)
@@ -1387,6 +1431,80 @@ si=す
             return true;
         }
 
+        // ========== phoneticHint / lyric[hint] 解析 ==========
+        /// <summary>
+        /// 按引号 + 分隔符切分 hint。
+        /// 规则：
+        ///   - 双引号内 "..." 整体作为一个 token（保留内部空格）
+        ///   - 引号外按 ',' 和空格切分
+        ///   - 未闭合的引号按普通字符处理
+        /// 示例：
+        ///   ka ki ku              → ["ka", "ki", "ku"]
+        ///   "e い"                → ["e い"]
+        ///   ka,"e い",ku          → ["ka", "e い", "ku"]
+        ///   "e い",30 70          → ["e い", "30", "70"]
+        /// </summary>
+        private List<string> SplitHintTokens(string hint)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrEmpty(hint)) return result;
+
+            int i = 0;
+            var current = new StringBuilder();
+
+            while (i < hint.Length)
+            {
+                char c = hint[i];
+
+                if (c == '"')
+                {
+                    int close = hint.IndexOf('"', i + 1);
+                    if (close < 0)
+                    {
+                        current.Append(c);
+                        i++;
+                        continue;
+                    }
+
+                    if (current.Length > 0)
+                    {
+                        string t = current.ToString().Trim();
+                        if (!string.IsNullOrEmpty(t)) result.Add(t);
+                        current.Clear();
+                    }
+
+                    string inner = hint.Substring(i + 1, close - i - 1).Trim();
+                    if (!string.IsNullOrEmpty(inner)) result.Add(inner);
+
+                    i = close + 1;
+                    continue;
+                }
+
+                if (c == ',' || char.IsWhiteSpace(c))
+                {
+                    if (current.Length > 0)
+                    {
+                        string t = current.ToString().Trim();
+                        if (!string.IsNullOrEmpty(t)) result.Add(t);
+                        current.Clear();
+                    }
+                    i++;
+                    continue;
+                }
+
+                current.Append(c);
+                i++;
+            }
+
+            if (current.Length > 0)
+            {
+                string t = current.ToString().Trim();
+                if (!string.IsNullOrEmpty(t)) result.Add(t);
+            }
+
+            return result;
+        }
+
         private bool ResolveHintPhonemes(
             string hint,
             string lyric,
@@ -1400,12 +1518,9 @@ si=す
             if (string.IsNullOrWhiteSpace(hint))
                 return false;
 
-            string[] parts = hint.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(p => p.Trim())
-                .Where(p => !string.IsNullOrEmpty(p))
-                .ToArray();
+            var parts = SplitHintTokens(hint);
 
-            if (parts.Length == 0)
+            if (parts.Count == 0)
                 return false;
 
             var hintPhonemes = new List<string>();
@@ -1423,6 +1538,8 @@ si=す
                     hasAnyNonNumeric = true;
                     if (IsKana(part))
                         hintPhonemes.Add(part);
+                    else if (IsExplicitVcvOrKana(part))
+                        hintPhonemes.Add(part);   // 引号内 "e い" 整体保留
                     else if (RomajiToKanaMap.TryGetValue(part.ToLower(), out string kana))
                         hintPhonemes.Add(kana);
                     else
@@ -1558,28 +1675,45 @@ si=す
             for (int i = 0; i < allHiraganas.Count; i++)
             {
                 string current = allHiraganas[i];
-                string connectVowel;
-                if (i == 0)
-                    connectVowel = headBreak ? null : prevVowel;
-                else
-                    connectVowel = GetTailVowel(allHiraganas[i - 1]);
+                SplitExplicitVcv(current, out string explicitPrefix, out string body);
 
                 string foundPhoneme = null;
 
-                if (!string.IsNullOrEmpty(connectVowel))
+                if (!string.IsNullOrEmpty(explicitPrefix))
                 {
-                    string vcv = $"{connectVowel} {current}";
-                    if (CheckOtoHit(vcv, firstNote, out _))
-                        foundPhoneme = vcv;
+                    if (CheckOtoHit(current, firstNote, out _))
+                        foundPhoneme = current;
+                    else if (CheckOtoHit(body, firstNote, out _))
+                        foundPhoneme = body;
+                    else
+                        foundPhoneme = body;
                 }
-                if (foundPhoneme == null && i == 0)
+                else
                 {
-                    string noPrev = $"- {current}";
-                    if (CheckOtoHit(noPrev, firstNote, out _))
-                        foundPhoneme = noPrev;
+                    string connectVowel;
+                    if (i == 0)
+                        connectVowel = headBreak ? null : prevVowel;
+                    else
+                    {
+                        SplitExplicitVcv(allHiraganas[i - 1], out _, out string prevBody);
+                        connectVowel = GetTailVowel(prevBody);
+                    }
+
+                    if (!string.IsNullOrEmpty(connectVowel))
+                    {
+                        string vcv = $"{connectVowel} {body}";
+                        if (CheckOtoHit(vcv, firstNote, out _))
+                            foundPhoneme = vcv;
+                    }
+                    if (foundPhoneme == null && i == 0)
+                    {
+                        string noPrev = $"- {body}";
+                        if (CheckOtoHit(noPrev, firstNote, out _))
+                            foundPhoneme = noPrev;
+                    }
+                    if (foundPhoneme == null)
+                        foundPhoneme = body;
                 }
-                if (foundPhoneme == null)
-                    foundPhoneme = current;
 
                 outputPhonemes.Add(foundPhoneme);
             }
@@ -1627,33 +1761,49 @@ si=す
             for (int i = 0; i < hiraganas.Length; i++)
             {
                 string current = hiraganas[i];
-                string connectVowel;
-                if (i == 0)
-                    connectVowel = headBreak ? null : prevVowel;
-                else
-                    connectVowel = GetTailVowel(hiraganas[i - 1]);
+                SplitExplicitVcv(current, out string explicitPrefix, out string body);
 
                 string foundPhoneme = null;
 
-                if (!string.IsNullOrEmpty(connectVowel))
+                if (!string.IsNullOrEmpty(explicitPrefix))
                 {
-                    string vcv = $"{connectVowel} {current}";
-                    if (CheckOtoHit(vcv, note, out _))
-                        foundPhoneme = vcv;
+                    if (CheckOtoHit(current, note, out _))
+                        foundPhoneme = current;
+                    else if (CheckOtoHit(body, note, out _))
+                        foundPhoneme = body;
+                    else
+                        foundPhoneme = body;
                 }
-                if (foundPhoneme == null && i == 0)
+                else
                 {
-                    string noPrev = $"- {current}";
-                    if (CheckOtoHit(noPrev, note, out _))
-                        foundPhoneme = noPrev;
+                    string connectVowel;
+                    if (i == 0)
+                        connectVowel = headBreak ? null : prevVowel;
+                    else
+                    {
+                        SplitExplicitVcv(hiraganas[i - 1], out _, out string prevBody);
+                        connectVowel = GetTailVowel(prevBody);
+                    }
+
+                    if (!string.IsNullOrEmpty(connectVowel))
+                    {
+                        string vcv = $"{connectVowel} {body}";
+                        if (CheckOtoHit(vcv, note, out _))
+                            foundPhoneme = vcv;
+                    }
+                    if (foundPhoneme == null && i == 0)
+                    {
+                        string noPrev = $"- {body}";
+                        if (CheckOtoHit(noPrev, note, out _))
+                            foundPhoneme = noPrev;
+                    }
+                    if (foundPhoneme == null)
+                        foundPhoneme = body;
                 }
-                if (foundPhoneme == null)
-                    foundPhoneme = current;
 
                 outputPhonemes.Add(foundPhoneme);
             }
 
-            // 单音符：perPhoneme 信息由 savedPinyin 提供，index/total 用单次
             List<string> pinyinList = new List<string>();
             List<int> indexList = new List<int>();
             List<int> totalList = new List<int>();
